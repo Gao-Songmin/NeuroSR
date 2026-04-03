@@ -14,26 +14,25 @@ from utils import (
     save_output_volumes,
     calculate_psnr_ssim_lpips,
     load_encdec_from_autoencoder,
-    abs_l1,
+    print_networks,
 )
 
 from autoencoder import AutoEncoder3Dto2Dto3D
 
-experiment_name = "ablations/PretrainedEncDec_3Dto2Dv2_skipf3_CASSv2_repair_MLP_shrink1.0,4.0_nosobel_decay_6,10_over5,75_0.17pi_fif"
-# supr_aug = "lg0.2_lh1_ls1e-9_gan_40warm"
-lr_dir = "/home/gsm/data/Neuron_SR/soma_and_terminal_blocks_comet_tailed/decay_6,10_over5,75_0.17pi/train"
-hr_dir = "/home/gsm/data/Neuron_SR/soma_and_terminal_blocks/train"
-lr_dir_test = "/home/gsm/data/Neuron_SR/soma_and_terminal_blocks_comet_tailed/decay_6,10_over5,75_0.17pi/test_mini"
-hr_dir_test = "/home/gsm/data/Neuron_SR/soma_and_terminal_blocks/test_mini"
+experiment_name = "my_neurosr"
+lr_dir = "data/LR/train"
+hr_dir = "data/HR/train"
+lr_dir_test = "data/LR/mini_test"
+hr_dir_test = "data/HR/mini_test"
 checkpoint_dir = f"checkpoints/{experiment_name}"
 images_dir = f"images/{experiment_name}"
 log_dir = f"logs/{experiment_name}"
-encdec_statedict_path = "model_zoo/EncDecV2_skipf3_pretrained_model_300.pth"
+encdec_statedict_path = "model_zoo/enc_ec_3d.pth"
 
 # check this!!!
-use_CASS = True
-use_sobel = False
-init_epoch = 300
+use_ASSL = True
+use_sobel = True
+init_epoch = 0
 
 os.makedirs(checkpoint_dir, exist_ok=True)
 os.makedirs(images_dir, exist_ok=True)
@@ -73,32 +72,17 @@ n_epochs = 600
 save_interval = 500  # batches
 checkpoint_interval = 1  # epochs
 warmup_batches = 75000
-test_every = 10
+test_every = 10  # epochs
 lambda_sobel = 0.05
 lambda_gan = 0.2
 lambda_hess = 1
 lambda_sparse = 1e-9
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-# # mean and std of soma dataset
-# mean = {"hr": 0.09339826, "lr": 0.096223116}
-# std = {"hr": 0.07190361, "lr": 0.07844172}
 
-# mean and std of soma and terminal dataset
+# mean and std of the dataset
 mean = {"hr": 0.053519323, "lr": 0.04907289}
 std = {"hr": 0.04579687, "lr": 0.053449016}
-
-# # mean and std of soma and terminal dataset with psf
-# mean = {"hr": 0.053519323, "lr": 0.10100848}
-# std = {"hr": 0.04579687, "lr": 0.051701855}
-
-# # mean and std of human soma dataset
-# mean = {"hr": 0.041036185, "lr": 0.04684453}
-# std = {"hr": 0.097351074, "lr": 0.11134179}
-
-# # mean and std of soma and terminal dataset with noise
-# mean = {"hr": 0.053519323, "lr": 0.07661523}
-# std = {"hr": 0.04579687, "lr": 0.0545185}
 
 ms_mes = f"mean:{mean}, std:{std}"
 save_log(train_log_path, ms_mes)
@@ -117,7 +101,7 @@ test_dataloader = DataLoader(
     num_workers=1,
 )
 
-generator = MambaIR_3Dto2D(
+generator = NeuroSR(
     img_size=img_size,
     patch_size=patch_size,
     in_chans=in_chans_SR,
@@ -134,7 +118,7 @@ generator = MambaIR_3Dto2D(
     img_range=1.0,
     upsampler="pixelshuffle",
     resi_connection=resi_connection,
-    use_CASS=use_CASS,
+    use_ASSL=use_ASSL,
 ).to(device)
 
 print_networks(generator, verbose=True, log_file_path=train_log_path)
@@ -162,8 +146,6 @@ criterion_pixel = nn.L1Loss().to(device)
 criterion_GAN = nn.BCEWithLogitsLoss().to(device)
 if use_sobel:
     criterion_sobel = Sobel3DLoss().to(device)
-# criterion_hess = HessianPenalty3D().to(device)
-# criterion_hess = HessianLoss3D().to(device)
 
 
 # ----------
@@ -193,7 +175,7 @@ if __name__ == "__main__":
 
     for epoch in range(init_epoch, n_epochs):
         if epoch > 400:
-            # test_every = 10
+            # test_every = 1
             checkpoint_interval = 1
 
         epoch_loss_G = 0.0
@@ -301,25 +283,7 @@ if __name__ == "__main__":
             else:
                 loss_sobel = torch.tensor(0)
 
-            # hess_penalty = criterion_hess(gen_hr.unsqueeze(1))
-            # sparse_penalty = gen_hr.abs().sum(dim=(1, 2, 3)).mean()
-            # loss_hess = criterion_hess(gen_hr.unsqueeze(1), imgs_hr.unsqueeze(1))
-            # loss_sparse = (abs_l1(gen_hr) - abs_l1(imgs_hr)).abs()
-
             loss_G = (loss_pixel + loss_GAN) / 2 + lambda_sobel * loss_sobel
-
-            # loss_G = (
-            #     (loss_pixel + loss_GAN) / 2
-            #     + lambda_hess * hess_penalty
-            #     + lambda_sparse * sparse_penalty
-            # )
-
-            # loss_G = (
-            #     loss_pixel
-            #     + loss_GAN * lambda_gan
-            #     + lambda_hess * hess_penalty
-            #     + lambda_sparse * sparse_penalty
-            # )
 
             loss_G.backward()
             optimizer_G.step()
@@ -355,9 +319,6 @@ if __name__ == "__main__":
                     loss_G.item(),
                     loss_GAN.item(),
                     loss_pixel.item(),
-                    # lambda_sobel * loss_sobel.item(),
-                    # lambda_hess * hess_penalty.item(),
-                    # lambda_sparse * sparse_penalty.item(),
                 )
             )
             print(log_message)

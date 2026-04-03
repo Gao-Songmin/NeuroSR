@@ -3,15 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-############################################
-# 基础积木：3D卷积和2D卷积模块
-############################################
-
-
 class Conv3dBlock(nn.Module):
     def __init__(self, cin, cout, k=(3, 3, 3)):
         super().__init__()
-        pad = tuple(ki // 2 for ki in k)  # 保持尺寸不变
+        pad = tuple(ki // 2 for ki in k)
         self.block = nn.Sequential(
             nn.Conv3d(cin, cout, kernel_size=k, padding=pad, bias=False),
             nn.GELU(),
@@ -56,10 +51,8 @@ class DownSample(nn.Module):
 ############################################
 class Encoder3DTo2D(nn.Module):
     """
-    输入:  x3d [B, 1, 64, 64, 256]
-    输出:  f2d [B, 64, 64, 256]   # 压缩到2D
-    skip_low  [B, 32, 64, 64, 256]
-    skip_high [B, 64, 64, 64, 256]
+    Input:  x3d [B, 1, 64, 64, 256]
+    Output:  f2d [B, 64, 64, 256]
     """
 
     def __init__(self):
@@ -127,7 +120,7 @@ class Decoder2DTo3D(nn.Module):
 
     def __init__(self, in2d_ch=128, out_ch=1, base_depth=4):
         super().__init__()
-        self.base_depth = base_depth  # 初始薄层深度
+        self.base_depth = base_depth 
 
         self.up1 = nn.ConvTranspose3d(64, 64, kernel_size=(4, 1, 1), stride=(4, 1, 1))
         self.up2 = nn.ConvTranspose3d(32, 32, kernel_size=(4, 1, 1), stride=(4, 1, 1))

@@ -4,8 +4,6 @@ from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import spectral_norm
 import torch.utils.checkpoint as checkpoint
-from torchvision.models import vgg19
-# from basicsr.utils.registry import ARCH_REGISTRY
 
 from functools import partial
 from typing import Optional, Callable
@@ -16,30 +14,9 @@ from einops import rearrange, repeat
 from autoencoder import *
 
 
-def print_networks(net: nn.Module, verbose=True, log_file_path=None):
-    num_params = 0
-    message = "---------- Networks initialized -------------\n"
-    for param in net.parameters():
-        num_params += param.numel()
-    if verbose:
-        message += net.__str__() + "\n"
-    message += "[Network] Total number of parameters : %.3f M\n" % (num_params / 1e6)
-    message += "-----------------------------------------------"
-    print(message)
-    with open(log_file_path, "a") as log_file:
-        log_file.write(message)
-
-
-class Feature_Extractor(nn.Module):
-    def __init__(self):
-        super().__init__()
-        vgg19_model = vgg19(pretrained=True)
-        self.vgg19_54 = nn.Sequential(*list(vgg19_model.features.children())[:35])
-
-    def forward(self, x):
-        if x.shape[1] == 1:
-            x = x.repeat(1, 3, 1, 1)
-        return self.vgg19_54(x)
+##################################
+# Generator Models
+##################################
 
 
 class Mlp(nn.Module):
@@ -68,8 +45,8 @@ class Mlp(nn.Module):
         return x
 
 
-class CASSDiff2(nn.Module):
-    """Convolutional Across Scale Self-similarity, which add scale transform on CASS Layer"""
+class ASSDiff2(nn.Module):
+    """Across-scale Self-similarity Layer, which add scale transform on CSS Layer"""
 
     def __init__(self, init_rp=0.0, align_corners=True, s_min=0.1):
         super().__init__()
@@ -113,7 +90,7 @@ class CASSDiff2(nn.Module):
         base_row = base[0]
         base_col = base[1]
 
-        # scale in (0, 16)
+        # scale in (1, 4)
         s_min, s_max = 1.0, 4.0
         s1 = s_min + (s_max - s_min) * torch.sigmoid(self.raw_s1)
 
@@ -144,7 +121,7 @@ class CASSDiff2(nn.Module):
         return diff2
 
 
-class CASS(nn.Module):
+class ASSL(nn.Module):
     """Convolutional Across Scale Self-similarity"""
 
     def __init__(self, in_ch: int, mid_ch: int = None):
@@ -152,13 +129,13 @@ class CASS(nn.Module):
         if mid_ch is None:
             mid_ch = max(8, in_ch // 4)
 
-        self.cass = CASSDiff2(init_rp=0.0)
+        self.ass = ASSDiff2(init_rp=0.0)
         self.act = nn.GELU()
 
     def forward(self, x):
-        diff = self.cass(x)
-        cass = self.act(diff)
-        return cass
+        diff = self.ass(x)
+        out = self.act(diff)
+        return out
 
 
 class SS2D(nn.Module):
@@ -452,7 +429,7 @@ class VSSBlock(nn.Module):
         attn_drop_rate: float = 0,
         d_state: int = 16,
         expand: float = 2.0,
-        use_CASS=True,
+        use_ASSL=True,
         is_light_sr: bool = False,
         **kwargs,
     ):
@@ -467,8 +444,8 @@ class VSSBlock(nn.Module):
         )
         self.drop_path = DropPath(drop_path)
         self.skip_scale = nn.Parameter(torch.ones(hidden_dim))
-        if use_CASS:
-            self.cass = CASS(hidden_dim)
+        if use_ASSL:
+            self.cass = ASSL(hidden_dim)
         else:
             self.cass = nn.Identity()
         self.mlp = Mlp(
@@ -504,7 +481,7 @@ class VSSBlock(nn.Module):
 
 
 class BasicLayer(nn.Module):
-    """The Basic MambaIR Layer in one Residual State Space Group
+    """The Basic Layer in one Residual State Space Group
     Args:
         dim (int): Number of input channels.
         input_resolution (tuple[int]): Input resolution.
@@ -527,7 +504,7 @@ class BasicLayer(nn.Module):
         norm_layer=nn.LayerNorm,
         downsample=None,
         use_checkpoint=False,
-        use_CASS=True,
+        use_ASSL=True,
         is_light_sr=False,
     ):
         super().__init__()
@@ -551,7 +528,7 @@ class BasicLayer(nn.Module):
                     d_state=d_state,
                     expand=self.mlp_ratio,
                     input_resolution=input_resolution,
-                    use_CASS=use_CASS,
+                    use_ASSL=use_ASSL,
                     is_light_sr=is_light_sr,
                 )
             )
@@ -618,7 +595,7 @@ class ResidualGroup(nn.Module):
         patch_size=None,
         resi_connection="1conv",
         is_light_sr=False,
-        use_CASS=True,
+        use_ASSL=True,
     ):
         super(ResidualGroup, self).__init__()
 
@@ -635,7 +612,7 @@ class ResidualGroup(nn.Module):
             norm_layer=norm_layer,
             downsample=downsample,
             use_checkpoint=use_checkpoint,
-            use_CASS=use_CASS,
+            use_ASSL=use_ASSL,
             is_light_sr=is_light_sr,
         )
 
@@ -687,8 +664,8 @@ class ResidualGroup(nn.Module):
         return flops
 
 
-class MambaIR_3Dto2D(nn.Module):
-    r"""MambaIR Model
+class NeuroSR(nn.Module):
+    """NeuroSR Model
         A PyTorch impl of : `A Simple Baseline for Image Restoration with State Space Model `.
 
     Args:
@@ -727,10 +704,10 @@ class MambaIR_3Dto2D(nn.Module):
         img_range=1.0,
         upsampler="pixelshuffle",
         resi_connection="1conv",
-        use_CASS=True,
+        use_ASSL=True,
         **kwargs,
     ):
-        super(MambaIR_3Dto2D, self).__init__()
+        super(NeuroSR, self).__init__()
         num_in_ch = in_chans
         num_out_ch = in_chans
         num_feat = 4
@@ -800,7 +777,7 @@ class MambaIR_3Dto2D(nn.Module):
                 patch_size=patch_size,
                 resi_connection=resi_connection,
                 is_light_sr=self.is_light_sr,
-                use_CASS=use_CASS,
+                use_ASSL=use_ASSL,
             )
             self.layers.append(layer)
         self.norm = norm_layer(self.num_features)
@@ -1110,119 +1087,9 @@ class Upsample3D(nn.Sequential):
         super(Upsample3D, self).__init__(*m)
 
 
-# class CRB_Layer(nn.Module):
-#     def __init__(self, nf1):
-#         super(CRB_Layer, self).__init__()
-
-#         self.mambaBlock = VSSBlock(hidden_dim=128)
-
-#     def forward(self, x):
-#         B, C, H, W = x.shape
-
-#         x = x.permute(0, 2, 3, 1).view(B, H * W, C)
-
-#         out = self.mambaBlock(x, (H, W))
-
-#         out = out.view(B, H, W, C).permute(0, 3, 1, 2)
-
-#         return out
-
-# class UpsampleBlock(nn.Module):
-#     def __init__(self, filters, upscale_factor=2):
-#         super().__init__()
-#         layers = [
-#             nn.Conv2d(
-#                 filters, filters, kernel_size=3, stride=1, padding=1, groups=filters
-#             ),
-#             nn.Conv2d(filters, filters * upscale_factor, kernel_size=1),
-#             nn.LeakyReLU(inplace=True),
-#             VerticalPixelShuffel(upscale_factor=upscale_factor),
-#         ]
-#         self.model = nn.Sequential(*layers)
-
-#     def forward(self, x):
-#         return self.model(x)
-
-
-# class Restorer(nn.Module):
-#     def __init__(self, in_nc=64, out_nc=64, nf=128, nb=8, n_upsampler=2):
-#         super(Restorer, self).__init__()
-#         self.num_blocks = nb
-
-#         self.head = nn.Conv2d(in_nc, nf, 3, stride=1, padding=1)
-
-#         self.neuroTreeConv = NeuronTreeConv(nf)
-
-#         self.dwc3x3 = nn.Conv2d(nf, nf, 3, stride=1, padding=1, groups=nf)
-
-#         self.fuse_head = nn.Conv2d(2 * nf, nf, 1, 1)
-
-#         body = [CRB_Layer(nf) for _ in range(nb)]
-#         self.body = nn.Sequential(*body)
-
-#         self.conv = nn.Conv2d(nf, nf, kernel_size=3, stride=1, padding=1)
-
-#         self.upsampling = nn.Sequential(
-#             *[UpsampleBlock(nf, upscale_factor=2) for _ in range(n_upsampler)]
-#         )
-
-#         self.fusion = nn.Conv2d(nf, out_nc, 3, 1, 1)
-
-#     def forward(self, input):
-#         f_shallow = self.head(input)
-
-#         # skeleton在空间上特别稀疏，因此，刚开始使用树状空洞卷积去做
-#         # f1 = self.neuroTreeConv(f_shallow)
-#         # f2 = self.dwc3x3(f)
-#         # f = self.fuse_head(torch.cat([f1, f2], dim=1))
-
-#         f = self.body(f_shallow)
-
-#         f = self.conv(f)
-
-#         out = torch.add(f, f_shallow)
-
-#         out = self.upsampling(out)
-
-#         out = self.fusion(out)
-
-#         # 该实验使用clamp
-#         #        out = torch.clamp(out, min=self.min, max=self.max)
-
-#         return out
-
-
-# class DAN(nn.Module):
-#     def __init__(
-#         self,
-#         in_channels=64,
-#         filters=128,
-#         out_channels=64,
-#         num_blocks=20,
-#         min=0.0,
-#         max=1.0,
-#     ):
-#         super(DAN, self).__init__()
-
-#         self.Restorer = Restorer(
-#             in_channels=in_channels,
-#             filters=filters,
-#             out_channels=out_channels,
-#             num_blocks=num_blocks,
-#         )
-#         self.min = min
-#         self.max = max
-#         # 添加 Sigmoid 层
-#         self.sigmoid = nn.Sigmoid()
-
-#     def forward(self, skeleton):
-#         B, C, H, W = skeleton.shape
-
-#         out = self.Restorer(skeleton)
-
-#         # out = self.sigmoid(out)
-
-#         return out
+##################################
+# Discriminator Models
+##################################
 
 
 class UNetDiscriminatorSN(nn.Module):
@@ -1285,127 +1152,3 @@ class UNetDiscriminatorSN(nn.Module):
         out = self.conv9(out)
 
         return out
-
-
-# class NeuronTreeConv(nn.Module):
-#     def __init__(self, channel=64):
-#         super(NeuronTreeConv, self).__init__()
-
-#         # 分多少个组
-#         self.chunks_num = 8
-
-#         # 每个组多少feature map
-#         self.feature_num = channel // self.chunks_num
-
-#         self.d6dwc_9x9_fw = nn.Conv2d(
-#             in_channels=self.feature_num,
-#             out_channels=self.feature_num,
-#             kernel_size=9,
-#             groups=self.feature_num,
-#             padding=((9 // 2) * 6),
-#             dilation=6,
-#         )
-
-#         self.d4dwc_9x9_fw = nn.Conv2d(
-#             in_channels=self.feature_num,
-#             out_channels=self.feature_num,
-#             kernel_size=9,
-#             groups=self.feature_num,
-#             padding=((9 // 2) * 4),
-#             dilation=4,
-#         )
-
-#         self.d2dwc_9x9_fw = nn.Conv2d(
-#             in_channels=self.feature_num,
-#             out_channels=self.feature_num,
-#             kernel_size=9,
-#             groups=self.feature_num,
-#             padding=((9 // 2) * 2),
-#             dilation=2,
-#         )
-
-#         self.conv_3x3 = nn.Conv2d(
-#             self.feature_num * 2, self.feature_num * 2, 3, stride=1, padding=1
-#         )
-
-#         self.d2dwc_9x9_bw = nn.Conv2d(
-#             in_channels=self.feature_num,
-#             out_channels=self.feature_num,
-#             kernel_size=9,
-#             groups=self.feature_num,
-#             padding=((9 // 2) * 2),
-#             dilation=2,
-#         )
-
-#         self.d4dwc_9x9_bw = nn.Conv2d(
-#             in_channels=self.feature_num,
-#             out_channels=self.feature_num,
-#             kernel_size=9,
-#             groups=self.feature_num,
-#             padding=((9 // 2) * 4),
-#             dilation=4,
-#         )
-
-#         self.d6dwc_9x9_bw = nn.Conv2d(
-#             in_channels=self.feature_num,
-#             out_channels=self.feature_num,
-#             kernel_size=9,
-#             groups=self.feature_num,
-#             padding=((9 // 2) * 6),
-#             dilation=6,
-#         )
-
-#         self.conv1x1 = nn.Conv2d(channel, channel, 1, 1)
-
-#         self.fusion = nn.Conv2d(channel * 2, channel, 1, 1)
-
-#     def forward(self, x):
-#         N, C, H, W = x.shape
-
-#         x_channel = self.conv1x1(x)
-
-#         x_chunks = torch.chunk(x, chunks=self.chunks_num, dim=1)
-
-#         # print(x_chunks[0].shape)
-
-#         x_group = []
-
-#         # 从前往后，对每一组内的feature map做卷积
-#         # 第i组
-#         for i in range(self.chunks_num):
-#             if i == 0:
-#                 x_group.append(self.d6dwc_9x9_fw(x_chunks[i]))
-#                 # print(x_group[i].shape)
-#             if i == 1:
-#                 x_group.append(self.d4dwc_9x9_fw(x_chunks[i]))
-#                 # print(x_group[i].shape)
-#             if i == 2:
-#                 x_group.append(self.d2dwc_9x9_fw(x_chunks[i]))
-#                 # print(x_group[i].shape)
-
-#             if i == 3:
-#                 x_group.append(
-#                     self.conv_3x3(torch.cat([x_chunks[3], x_chunks[4]], dim=1))
-#                 )
-#                 # print(x_group[i].shape)
-#             if i == 4:
-#                 pass
-#                 # x_group.append(self.dwc_3x3_2(x_chunks[i]))
-#                 # # print(x_group[i].shape)
-
-#             if i == 5:
-#                 x_group.append(self.d2dwc_9x9_bw(x_chunks[i]))
-#                 # print(x_group[i].shape)
-#             if i == 6:
-#                 x_group.append(self.d4dwc_9x9_bw(x_chunks[i]))
-#                 # print(x_group[i].shape)
-#             if i == 7:
-#                 x_group.append(self.d6dwc_9x9_bw(x_chunks[i]))
-#                 # print(x_group[i].shape)
-
-#         x_tree = torch.cat(x_group, dim=1)
-
-#         x = self.fusion(torch.cat([x_tree, x_channel], dim=1))
-
-#         # print(x.shape)
-#         return x
